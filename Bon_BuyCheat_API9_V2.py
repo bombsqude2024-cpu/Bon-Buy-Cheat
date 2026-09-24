@@ -664,19 +664,21 @@ def _open_panel() -> None:
         color=(0.075, 0.075, 0.095),
         stack_offset=(0, 0),
     )
+
     _panel_ref = root
 
-    # Decorative header.
+    # TITLE
     bui.textwidget(
         parent=root,
         position=(0, 555),
-        size=(780, 55),
+        size=(780, 50),
         text="☠",
-        scale=3.0,
+        scale=2.5,
         color=(0.92, 0.86, 0.20),
         h_align="center",
         v_align="center",
     )
+
     bui.textwidget(
         parent=root,
         position=(0, 515),
@@ -688,6 +690,7 @@ def _open_panel() -> None:
         v_align="center",
     )
 
+    # CLOSE
     bui.buttonwidget(
         parent=root,
         position=(690, 570),
@@ -699,16 +702,19 @@ def _open_panel() -> None:
         on_activate_call=_close_panel,
     )
 
+    # ON / OFF
     toggle = bui.buttonwidget(
         parent=root,
         position=(65, 455),
         size=(650, 48),
         label="ON" if _enabled else "OFF",
         text_scale=1.1,
-        color=(0.10, 0.65, 0.16) if _enabled else (0.55, 0.16, 0.16),
+        color=(0.10, 0.65, 0.16)
+        if _enabled else (0.55, 0.16, 0.16),
         button_type="square",
         on_activate_call=_toggle_enabled,
     )
+
     _toggle_enabled._button = toggle
 
     bui.textwidget(
@@ -722,90 +728,120 @@ def _open_panel() -> None:
         v_align="center",
     )
 
-    # Column headings.
+    # HEADERS
     bui.textwidget(
         parent=root,
         position=(70, 380),
-        size=(300, 32),
-        text="Item",
+        size=(280, 32),
+        text="ITEM",
         scale=0.95,
         color=(1.0, 0.88, 0.20),
         h_align="center",
         v_align="center",
     )
+
     bui.textwidget(
         parent=root,
-        position=(410, 380),
-        size=(300, 32),
-        text="Maximum price",
+        position=(470, 380),
+        size=(240, 32),
+        text="MAXIMUM PRICE",
         scale=0.95,
         color=(1.0, 0.88, 0.20),
         h_align="center",
         v_align="center",
     )
+
+    # ---------------------------------------------------------
+    # 6 REAL EDITABLE ITEM + PRICE FIELDS
+    # ---------------------------------------------------------
 
     row_y = 330
     row_gap = 52
 
     for i in range(MAX_SLOTS):
-        # Slot number.
+
+        # NUMBER
         bui.textwidget(
             parent=root,
-            position=(20, row_y + 5),
-            size=(35, 28),
+            position=(20, row_y + 4),
+            size=(35, 30),
             text=str(i + 1),
             scale=0.65,
-            color=(0.55, 0.55, 0.60),
+            color=(0.65, 0.65, 0.70),
             h_align="center",
             v_align="center",
         )
 
-        item_edit = bui.textwidget(
+        # ITEM FIELD BACKGROUND
+        item_bg = bui.containerwidget(
             parent=root,
-            position=(70, row_y),
-            size=(280, 36),
+            position=(65, row_y - 2),
+            size=(290, 40),
+            background=True,
+            color=(0.18, 0.18, 0.22),
+            scale=1.0,
+        )
+
+        # REAL EDITABLE ITEM FIELD
+        item_edit = bui.textwidget(
+            parent=item_bg,
+            position=(8, 2),
+            size=(274, 36),
             editable=True,
             selectable=True,
             text=saved["items"][i],
-            color=(0.92, 0.92, 0.96),
-            textcolor=(0.08, 0.08, 0.10),
+            color=(0.95, 0.95, 0.98),
             v_align="center",
             h_align="center",
             padding=5,
         )
+
         _item_widgets.append(item_edit)
 
-        # Tiny relation label beside/above each price field.
-        relation = bui.textwidget(
+        # ARROW / PAIR INDICATOR
+        bui.textwidget(
             parent=root,
-            position=(365, row_y + 8),
-            size=(95, 22),
-            text="for: " + (saved["items"][i].strip() or "empty"),
-            scale=0.48,
-            color=(0.65, 0.70, 0.78),
-            h_align="right",
+            position=(370, row_y + 3),
+            size=(80, 30),
+            text="→",
+            scale=1.0,
+            color=(0.75, 0.75, 0.80),
+            h_align="center",
             v_align="center",
         )
-        _item_labels.append(relation)
 
-        price_edit = bui.textwidget(
+        # PRICE FIELD BACKGROUND
+        price_bg = bui.containerwidget(
             parent=root,
-            position=(470, row_y),
-            size=(240, 36),
+            position=(465, row_y - 2),
+            size=(250, 40),
+            background=True,
+            color=(0.18, 0.18, 0.22),
+            scale=1.0,
+        )
+
+        # REAL EDITABLE PRICE FIELD
+        price_edit = bui.textwidget(
+            parent=price_bg,
+            position=(8, 2),
+            size=(234, 36),
             editable=True,
             selectable=True,
             text=saved["prices"][i],
-            color=(0.92, 0.92, 0.96),
-            textcolor=(0.08, 0.08, 0.10),
+            color=(0.95, 0.95, 0.98),
             v_align="center",
             h_align="center",
             padding=5,
         )
+
         _price_widgets.append(price_edit)
 
         row_y -= row_gap
 
-    # Save settings.
+    # ---------------------------------------------------------
+    # SAVE / CLOSE
+    # ---------------------------------------------------------
+
     bui.buttonwidget(
         parent=root,
         position=(70, 25),
@@ -827,15 +863,7 @@ def _open_panel() -> None:
         button_type="square",
         on_activate_call=_close_panel,
     )
-
-    _sync_pair_labels()
-
-    # Update "for: item" labels whenever the panel gets a moment to breathe.
-    def refresh_labels() -> None:
-        if _panel_exists():
-            _sync_pair_labels()
-
-    babase.apptimer(0.25, refresh_labels)
+    
 
 
 # ---------- chat-page button ----------
