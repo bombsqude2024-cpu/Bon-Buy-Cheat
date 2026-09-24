@@ -37,7 +37,7 @@ API_BASE = "https://api.bslife.ir"
 STATS_URL = API_BASE + "/mod/stats"
 
 MAX_SLOTS = 6
-POLL_SECONDS = 0.8
+POLL_SECONDS = 0.20
 BUY_DELAY_SECONDS = 0.03
 
 CONFIG_KEY = "Bon Buy Cheat Config"
