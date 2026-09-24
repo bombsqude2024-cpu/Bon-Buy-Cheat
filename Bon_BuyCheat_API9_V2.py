@@ -173,136 +173,197 @@ def _request_json(url: str) -> Any:
     return json.loads(raw)
 
 
+# ---------- BSLife sales backend ----------
+
 def _get_stats_config() -> dict | None:
-    """Get BSLife's live config. The supplied mod stores this as response['c']."""
+    """
+    Read the REAL BSLife /mod/stats response.
+
+    IMPORTANT:
+    In the original BSLife mod, the menu commands are in the
+    TOP-LEVEL 'm' key of the /mod/stats response.
+    We must return the whole response, not response['c'].
+    """
     try:
         _, token, _ = _get_account_token()
 
-        # The supplied BSLife mod sends form data here.
-        raw = _request(STATS_URL, token, urllib.parse.urlencode([]).encode("utf-8"))
+        raw = _request(
+            STATS_URL,
+            token,
+            urllib.parse.urlencode([]).encode("utf-8"),
+        )
 
         # /mod/stats returns base64 encoded JSON.
         try:
-            data = json.loads(base64.b64decode(raw))
+            decoded = base64.b64decode(raw)
+            data = json.loads(decoded)
         except Exception:
             data = json.loads(raw)
 
-        # Keep the rotated token if present; _request already saved it.
-        if isinstance(data, dict) and isinstance(data.get("c"), dict):
-            return data["c"]
-
-        # Some versions can expose the config directly.
-        if isinstance(data, dict) and isinstance(data.get("m"), dict):
+        if isinstance(data, dict):
             return data
 
     except Exception as exc:
         global _last_scan_error
-        _last_scan_error = str(exc)
+        _last_scan_error = "STATS: " + str(exc)
 
     return None
 
 
 def _find_sales_query_from_stats(config: dict) -> str | None:
     """
-    In the supplied BSLife mod, config['m'] is the menu dictionary:
-        visible_button_label -> menu command.
+    The original BSLife mod creates its buttons from:
 
-    We look specifically for the '$' button and then translate its
-    query__ command into the /mod/<query> endpoint.
+        stats_response['m']
+
+    The '$' button contains something like:
+
+        query__SOMETHING
+
+    We extract SOMETHING dynamically.
     """
+
     menu = config.get("m")
+
     if not isinstance(menu, dict):
         return None
 
-    # Exact '$' first.
+    # Exact dollar button first.
     candidates = []
+
     if "$" in menu:
         candidates.append(menu["$"])
 
-    # Be tolerant of a server-side label containing the dollar sign.
+    # Also support labels which contain '$'.
     for label, command in menu.items():
-        if "$" in str(label) and command not in candidates:
-            candidates.append(command)
+        if "$" in str(label):
+            if command not in candidates:
+                candidates.append(command)
 
     for command in candidates:
         command = str(command)
+
         if command.startswith("query__"):
             return command.split("__", 1)[1]
+
     return None
 
 
 def _ensure_sales_query() -> str | None:
     global _sales_query
 
+    # Don't permanently cache a failed lookup.
     if _sales_query:
         return _sales_query
 
     config = _get_stats_config()
+
     if not config:
         return None
 
-    _sales_query = _find_sales_query_from_stats(config)
-    return _sales_query
+    query = _find_sales_query_from_stats(config)
+
+    if query:
+        _sales_query = query
+
+    return query
 
 
 def _query_sales() -> Any:
-    query = _ensure_sales_query()
-    if not query:
-        return None
+    """
+    Ask the SAME BSLife API used by the original '$' sales button.
 
-    _, token, _ = _get_account_token()
-    raw = _request(API_BASE + "/mod/" + str(query), token)
+    This is not local-chat parsing.
+    This is the central BSLife sales database endpoint.
+    """
+
+    query = _ensure_sales_query()
+
+    if not query:
+        global _last_scan_error
+        _last_scan_error = "Could not find BSLife sales query"
+        return None
 
     try:
-        return json.loads(raw, object_pairs_hook=dict)
-    except Exception:
+        _, token, _ = _get_account_token()
+
+        raw = _request(
+            API_BASE + "/mod/" + str(query),
+            token,
+            urllib.parse.urlencode([]).encode("utf-8"),
+        )
+
+        # The original mod receives normal JSON here.
+        try:
+            return json.loads(
+                raw,
+                object_pairs_hook=dict,
+            )
+        except Exception:
+
+            # Extra tolerance in case the server wraps the response.
+            try:
+                decoded = base64.b64decode(raw)
+                return json.loads(
+                    decoded,
+                    object_pairs_hook=dict,
+                )
+            except Exception:
+                _last_scan_error = "Invalid BSLife sales response"
+                return None
+
+    except Exception as exc:
+        _last_scan_error = "SALES: " + str(exc)
         return None
 
 
-# ---------- sales parser ----------
+# ---------- REAL BSLife row decoder ----------
 
-_CODE_RE = re.compile(r"(?<![A-Za-z0-9])s(\d+)(?![A-Za-z0-9])", re.I)
-_PRICE_RE = re.compile(
-    r"(?<![A-Za-z0-9])(\d[\d,]*(?:\.\d+)?)\s*([kK])?(?![A-Za-z0-9])"
-)
-_ITEM_RE = re.compile(
-    r"s\d+\s*:\s*.*?([A-Za-z][A-Za-z0-9_]*)\s*[xX×]\s*(\d+)",
+_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9])s(\d{2,4})(?![A-Za-z0-9])",
     re.I,
 )
-_SIMPLE_ITEM_RE = re.compile(
-    r"\b(?:item|name)\s*[:=]\s*([A-Za-z][A-Za-z0-9_]*)",
-    re.I,
+
+_PRICE_AFTER_ARROW_RE = re.compile(
+    r"(?:->|→)\s*"
+    r"(\d[\d,]*(?:\.\d+)?)"
+    r"\s*([kKmM])?",
+)
+
+_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(\d[\d,]*(?:\.\d+)?)"
+    r"\s*([kKmM])?"
+    r"(?![A-Za-z0-9])"
 )
 
 
 def _price_to_number(value: str, suffix: str = "") -> float:
-    value = value.replace(",", "").strip()
+    value = str(value).replace(",", "").strip()
+
     number = float(value)
-    if suffix.lower() == "k":
+
+    suffix = str(suffix or "").lower()
+
+    if suffix == "k":
         number *= 1000.0
+    elif suffix == "m":
+        number *= 1000000.0
+
     return number
 
 
-def _flatten_text(obj: Any) -> list[str]:
-    out: list[str] = []
+def _resolve_row_value(value: Any, row: Any, depth: int = 0) -> list[str]:
+    """
+    Decode the compact [row_index, value_index] references used
+    by the REAL BSLife mod.
 
-    if isinstance(obj, str):
-        out.append(obj)
-    elif isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(k, str):
-                out.append(k)
-            out.extend(_flatten_text(v))
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            out.extend(_flatten_text(v))
+    The original renderer uses:
 
-    return out
+        row['r'][ref[0]][ref[1]]
+    """
 
-
-def _resolve_bslife_value(value: Any, row: Any, depth: int = 0) -> list[str]:
-    """Resolve the compact row-reference format used by BSLife query data."""
-    if depth > 8:
+    if depth > 10:
         return []
 
     if isinstance(value, str):
@@ -312,153 +373,375 @@ def _resolve_bslife_value(value: Any, row: Any, depth: int = 0) -> list[str]:
         return [str(value)]
 
     if isinstance(value, (list, tuple)):
-        # The supplied BSLife renderer uses [row_key, value_key]
-        # references and resolves them through row['r'][...].
+
+        # BSLife reference:
+        # [row-index, value-index]
         if (
             len(value) == 2
             and isinstance(row, dict)
-            and isinstance(row.get("r"), (dict, list, tuple))
+            and isinstance(row.get("r"), (list, tuple, dict))
         ):
             try:
-                container = row["r"]
+                rows = row["r"]
+
                 first = value[0]
                 second = value[1]
-                if isinstance(container, dict):
-                    resolved = container[first]
+
+                if isinstance(rows, dict):
+                    resolved = rows[first]
                 else:
-                    resolved = container[int(first)]
-                if isinstance(resolved, (dict, list, tuple)):
-                    if isinstance(resolved, dict):
-                        resolved = resolved[second]
-                    else:
-                        resolved = resolved[int(second)]
-                return _resolve_bslife_value(resolved, row, depth + 1)
+                    resolved = rows[int(first)]
+
+                if isinstance(resolved, dict):
+                    resolved = resolved[second]
+
+                elif isinstance(resolved, (list, tuple)):
+                    resolved = resolved[int(second)]
+
+                return _resolve_row_value(
+                    resolved,
+                    row,
+                    depth + 1,
+                )
+
             except Exception:
                 pass
 
-        result: list[str] = []
+        result = []
+
         for child in value:
-            result.extend(_resolve_bslife_value(child, row, depth + 1))
+            result.extend(
+                _resolve_row_value(
+                    child,
+                    row,
+                    depth + 1,
+                )
+            )
+
         return result
 
     if isinstance(value, dict):
-        result: list[str] = []
+
+        result = []
+
         for key, child in value.items():
+
             if isinstance(key, str):
                 result.append(key)
-            result.extend(_resolve_bslife_value(child, row, depth + 1))
+
+            result.extend(
+                _resolve_row_value(
+                    child,
+                    row,
+                    depth + 1,
+                )
+            )
+
         return result
 
     return []
 
 
-def _row_texts(row: Any) -> list[str]:
-    texts = _resolve_bslife_value(row, row)
+def _get_real_row_text(row: Any) -> str:
+    """
+    Reconstruct the text exactly from BSLife's row structure.
 
-    # De-duplicate while preserving order.
+    This is based on the same r/reference mechanism used by
+    the original mod.php renderer.
+    """
+
+    if not isinstance(row, dict):
+        return ""
+
+    parts = []
+
+    # BSLife's actual rendered fields live under 'r'.
+    rdata = row.get("r")
+
+    if isinstance(rdata, (list, tuple, dict)):
+
+        if isinstance(rdata, dict):
+            iterable = rdata.values()
+        else:
+            iterable = rdata
+
+        for group in iterable:
+
+            if isinstance(group, dict):
+                values = group.values()
+
+            elif isinstance(group, (list, tuple)):
+                values = group
+
+            else:
+                values = [group]
+
+            for value in values:
+
+                if isinstance(value, (str, int, float)):
+                    parts.append(str(value))
+
+    # Also inspect other row fields because some versions expose
+    # display information directly.
+    for key in ("text", "name", "item", "price", "code"):
+
+        value = row.get(key)
+
+        if value is not None:
+            parts.extend(
+                _resolve_row_value(
+                    value,
+                    row,
+                )
+            )
+
+    # Remove duplicates while keeping order.
     result = []
     seen = set()
-    for text in texts:
-        text = str(text).strip()
-        if text and text not in seen:
-            result.append(text)
-            seen.add(text)
-    return result
+
+    for part in parts:
+
+        part = str(part).strip()
+
+        if not part:
+            continue
+
+        if part not in seen:
+            seen.add(part)
+            result.append(part)
+
+    return " ".join(result)
 
 
-def _parse_sale_from_row(row: Any) -> dict | None:
-    texts = _row_texts(row)
-    if not texts:
+def _extract_sale_from_row(row: Any) -> dict | None:
+
+    if not isinstance(row, dict):
         return None
 
-    combined = " ".join(texts)
+    # First try the actual BSLife row representation.
+    combined = _get_real_row_text(row)
+
+    # Fallback: recursively resolve everything.
+    if not combined:
+        combined = " ".join(
+            _resolve_row_value(
+                row,
+                row,
+            )
+        )
+
+    if not combined:
+        return None
+
+    # --------------------------------------------------------
+    # 1. SALE CODE
+    # --------------------------------------------------------
+
     code_match = _CODE_RE.search(combined)
+
     if not code_match:
         return None
 
     code = "s" + code_match.group(1)
 
-    # Prefer the exact screenshot-style format:
-    # s403: [emoji] k x1 -> 4.7k
-    item = None
-    quantity = None
+    # --------------------------------------------------------
+    # 2. PRICE
+    # --------------------------------------------------------
 
-    item_match = _ITEM_RE.search(combined)
+    price = None
+
+    # The BSLife sales display puts the sale price after -> / →.
+    arrow_match = _PRICE_AFTER_ARROW_RE.search(combined)
+
+    if arrow_match:
+
+        try:
+            price = _price_to_number(
+                arrow_match.group(1),
+                arrow_match.group(2) or "",
+            )
+        except Exception:
+            price = None
+
+    # Fallback if the server response doesn't contain an arrow.
+    if price is None:
+
+        matches = list(
+            _NUMBER_RE.finditer(combined)
+        )
+
+        # Ignore the sale code itself.
+        for match in reversed(matches):
+
+            try:
+
+                candidate = _price_to_number(
+                    match.group(1),
+                    match.group(2) or "",
+                )
+
+                # Ignore suspiciously huge values.
+                if candidate >= 0:
+                    price = candidate
+                    break
+
+            except Exception:
+                pass
+
+    if price is None:
+        return None
+
+    # --------------------------------------------------------
+    # 3. ITEM
+    # --------------------------------------------------------
+
+    item = None
+
+    # Typical BSLife format:
+    #
+    # s123: ITEM x1 -> 2999
+    #
+    # Quantity is deliberately ignored.
+    #
+    item_match = re.search(
+        r"s\d{2,4}\s*:\s*"
+        r"(.*?)"
+        r"\s*[xX×]\s*\d+"
+        r"\s*(?:->|→)",
+        combined,
+        re.I,
+    )
+
     if item_match:
+
         item = item_match.group(1).strip()
-        quantity = int(item_match.group(2))
+
     else:
-        item_match = _SIMPLE_ITEM_RE.search(combined)
+
+        # More tolerant form:
+        #
+        # s123: ITEM -> 2999
+        #
+        item_match = re.search(
+            r"s\d{2,4}\s*:\s*"
+            r"(.*?)"
+            r"\s*(?:->|→)",
+            combined,
+            re.I,
+        )
+
         if item_match:
             item = item_match.group(1).strip()
 
-    # Price: prefer the number after an arrow because the same row can
-    # contain other numbers (seller id, quantity, etc.).
-    price = None
-    arrow_match = re.search(
-        r"(?:->|→)\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?",
-        combined,
-    )
-    if arrow_match:
-        price = _price_to_number(arrow_match.group(1), arrow_match.group(2) or "")
-    else:
-        # If the API exposes price as a separate field, this catches it.
-        # We use the last numeric token in the row as a conservative fallback.
-        matches = list(_PRICE_RE.finditer(combined))
-        if matches:
-            try:
-                price = _price_to_number(
-                    matches[-1].group(1),
-                    matches[-1].group(2) or "",
-                )
-            except Exception:
-                price = None
+    if not item:
 
-    if item is None or price is None:
+        # API versions which expose item/name separately.
+        for key in ("item", "name"):
+
+            value = row.get(key)
+
+            if value is not None:
+
+                vals = _resolve_row_value(
+                    value,
+                    row,
+                )
+
+                if vals:
+                    item = str(vals[0]).strip()
+                    break
+
+    if not item:
+        return None
+
+    # Remove accidental sale-code text from item.
+    item = re.sub(
+        r"^s\d{2,4}\s*:\s*",
+        "",
+        item,
+        flags=re.I,
+    ).strip()
+
+    # Remove quantity if it survived.
+    item = re.sub(
+        r"\s*[xX×]\s*\d+\s*$",
+        "",
+        item,
+    ).strip()
+
+    if not item:
         return None
 
     return {
         "code": code.lower(),
-        "item": item.lower(),
-        "quantity": quantity,
-        "price": price,
+        "item": item.casefold(),
+        "price": float(price),
         "raw": combined,
     }
 
 
 def _extract_sales(data: Any) -> list[dict]:
-    """
-    Primary path: BSLife query responses use a top-level 'list' of rows.
-    Fallback: recursively inspect list-like structures for rows containing
-    s<number> plus item/price information.
-    """
-    sales: list[dict] = []
 
-    if isinstance(data, dict) and isinstance(data.get("list"), list):
-        for row in data["list"]:
-            sale = _parse_sale_from_row(row)
-            if sale:
-                sales.append(sale)
+    sales = []
 
-    if not sales:
-        def walk(obj: Any) -> None:
-            if isinstance(obj, list):
-                sale = _parse_sale_from_row(obj)
+    # REAL BSLife query response:
+    #
+    # {
+    #     ...
+    #     "list": [
+    #         {
+    #             "r": ...
+    #         }
+    #     ]
+    # }
+    #
+    if isinstance(data, dict):
+
+        rows = data.get("list")
+
+        if isinstance(rows, list):
+
+            for row in rows:
+
+                sale = _extract_sale_from_row(row)
+
                 if sale:
                     sales.append(sale)
-                    return
-                for child in obj:
-                    walk(child)
-            elif isinstance(obj, dict):
+
+    # Fallback recursive scan.
+    if not sales:
+
+        def walk(obj: Any):
+
+            if isinstance(obj, dict):
+
+                sale = _extract_sale_from_row(obj)
+
+                if sale:
+                    sales.append(sale)
+
                 for value in obj.values():
+                    walk(value)
+
+            elif isinstance(obj, list):
+
+                for value in obj:
                     walk(value)
 
         walk(data)
 
-    # De-duplicate by purchase code.
-    unique: dict[str, dict] = {}
+    # --------------------------------------------------------
+    # Remove duplicate sale codes.
+    # --------------------------------------------------------
+
+    unique = {}
+
     for sale in sales:
-        unique[sale["code"]] = sale
+
+        code = sale.get("code")
+
+        if code:
+            unique[code] = sale
 
     return list(unique.values())
 
