@@ -176,14 +176,6 @@ def _request_json(url: str) -> Any:
 # ---------- BSLife sales backend ----------
 
 def _get_stats_config() -> dict | None:
-    """
-    Read the REAL BSLife /mod/stats response.
-
-    IMPORTANT:
-    In the original BSLife mod, the menu commands are in the
-    TOP-LEVEL 'm' key of the /mod/stats response.
-    We must return the whole response, not response['c'].
-    """
     try:
         _, token, _ = _get_account_token()
 
@@ -193,10 +185,8 @@ def _get_stats_config() -> dict | None:
             urllib.parse.urlencode([]).encode("utf-8"),
         )
 
-        # /mod/stats returns base64 encoded JSON.
         try:
-            decoded = base64.b64decode(raw)
-            data = json.loads(decoded)
+            data = json.loads(base64.b64decode(raw))
         except Exception:
             data = json.loads(raw)
 
